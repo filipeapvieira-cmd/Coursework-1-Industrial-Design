@@ -1,28 +1,9 @@
 #include <LiquidCrystal.h>
 #include <stdio.h>
+#include "config.h"
 
 // LCD pins
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
-
-// Pins
-const int TMP36_PIN = A0;
-const int POTENTIOMETER_PIN = A1;
-const int LED_PIN = 7;
-const int MOSFET_PIN = 9;  // NMOS gate (motor)
-
-// System parameters
-const float V_REF = 5.0;                         // Analog reference voltage
-const float R_BITS = 10.0;                       // ADC resolution (bits)
-const float ADC_STEPS = (1 << int(R_BITS)) - 1;  // Number of steps (2^R_BITS - 1)
-const float TOLERANCE = 0.5;                     // °C
-
-// Logger
-enum LogLevel : uint8_t { LOG_ERROR = 0,
-                          LOG_WARN = 1,
-                          LOG_INFO = 2,
-                          LOG_DEBUG = 3 };
-const bool LOGGING_ACTIVE = true;  // // Set to false to silence all logs
-
 
 /**
  * Converts a LogLevel enum into a label.
@@ -106,14 +87,14 @@ float readTemperatureC() {
  * Reads the potentiometer and converts its raw ADC value (0–1023)
  * into a temperature setpoint in °C.
  *
- * The value is mapped to the range 15–35 °C, so the 
+ * The value is mapped to the range POT_MIN_TEMPERATURE_VALUE–POT_MAX_TEMPERATURE_VALUE °C, so the 
  * potentiometer acts as a user-adjustable temperature control.
  *
- * @return float  Temperature setpoint in degrees Celsius (15–35 °C).
+ * @return float  Temperature setpoint in degrees Celsius.
  */
 float readSetpointC() {
   int rawValue = analogRead(POTENTIOMETER_PIN);
-  long setC = map(rawValue, 0, 1023, 15, 35);  // 15–35 °C
+  long setC = map(rawValue, 0, 1023, POT_MIN_TEMPERATURE_VALUE, POT_MAX_TEMPERATURE_VALUE);
 
   static bool seeded = false;
   static long lastSetC = -1;
@@ -131,32 +112,65 @@ float readSetpointC() {
   return (float)setC;
 }
 
+
 /**
- * Controls the motor (and LED) with tolerance to avoid rapid switching.
+ * Two-speed motor control with 1s hold-time (no tolerance).
+ * - Turn ON only if tC > setC continuously for HOLD_MS.
+ * - Turn OFF only if tC < setC continuously for HOLD_MS.
+ * - While ON: LOW speed unless tC >= setC*(1+MAX_OVER_RATIO) → HIGH.
  *
- * @param tC     Current measured temperature (°C).
- * @param setC   Temperature setpoint (°C).
- * @return bool  Current motor state (true = ON, false = OFF).
+ * @return uint8_t PWM applied (0, PWM_LOW, or PWM_HIGH)
  */
-bool controlMotor(float tC, float setC) {
-  static bool isMotorStateOn = false;
-  bool prev = isMotorStateOn;
+uint8_t updateMotorTwoSpeed(float tC, float setC) {
+  static bool on = false;
+  static uint8_t curPwm = 0;
 
-  if (tC > setC + TOLERANCE) {
-    isMotorStateOn = true;
-  } else if (tC < setC - TOLERANCE) {
-    isMotorStateOn = false;
-  }
+  // Timers for "over" and "under" conditions
+  static bool overTiming = false, underTiming = false;
+  static unsigned long overStart = 0, underStart = 0;
+  unsigned long now = millis();
 
-  if (isMotorStateOn != prev) {
-    if (isMotorStateOn) {
-      logMessage(LOG_INFO, "CHANGE - MOTOR ON", setC + TOLERANCE);
-    } else {
-      logMessage(LOG_INFO, "CHANGE - MOTOR OFF", setC - TOLERANCE);
+  // ON condition: tC > setC for >= HOLD_MS
+  if (tC > setC) {
+    if (!overTiming) { overTiming = true; overStart = now; }
+    if (!on && (now - overStart >= HOLD_MS)) {
+      on = true;
+      logMessage(LOG_INFO, "CHANGE - MOTOR ON");
     }
+  } else {
+    overTiming = false;
   }
 
-  return isMotorStateOn;
+  // OFF condition: tC < setC for >= HOLD_MS
+  if (tC < setC) {
+    if (!underTiming) { underTiming = true; underStart = now; }
+    if (on && (now - underStart >= HOLD_MS)) {
+      on = false;
+      logMessage(LOG_INFO, "CHANGE - MOTOR OFF");
+    }
+  } else {
+    underTiming = false;
+  }
+
+  // Decide target PWM
+  uint8_t targetPwm = 0;
+  if (on) {
+    const float highThresholdC = setC * (1.0f + MAX_OVER_RATIO);
+    targetPwm = (tC >= highThresholdC) ? PWM_HIGH : PWM_LOW;
+  }
+
+  // Apply outputs (log on change)
+  if (targetPwm != curPwm) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "CHANGE - MOTOR PWM FROM %u TO %u", curPwm, targetPwm);
+    logMessage(LOG_INFO, msg);
+    curPwm = targetPwm;
+  }
+
+  analogWrite(MOSFET_PIN, curPwm);
+  digitalWrite(LED_PIN, curPwm > 0 ? HIGH : LOW);
+
+  return curPwm;
 }
 
 void setup() {
@@ -170,7 +184,13 @@ void setup() {
   lcd.begin(16, 2);
   lcd.clear();
 
-  delay(100);
+  lcd.setCursor(0, 0);
+  lcd.print("Initializing...");
+
+  delay(500);
+
+  lcd.clear();
+
   Serial.print('\n');
   logMessage(LOG_DEBUG, "INITIAL READING - TEMPERATURE C ", readTemperatureC());
   logMessage(LOG_DEBUG, "INITIAL READING - SETPOINT ", readSetpointC());
@@ -179,12 +199,9 @@ void setup() {
 void loop() {
   float tC = readTemperatureC();
   float setC = readSetpointC();
-  bool isMotorStateOn = controlMotor(tC, setC);
 
-  // LED and Motor via NMOS
-  digitalWrite(LED_PIN, isMotorStateOn ? HIGH : LOW);
-  digitalWrite(MOSFET_PIN, isMotorStateOn ? HIGH : LOW);
-
+  updateMotorTwoSpeed(tC, setC);
+  
   // LCD
   lcd.setCursor(0, 0);
   lcd.print("Temp:");
@@ -200,3 +217,4 @@ void loop() {
 
   delay(200);
 }
+
