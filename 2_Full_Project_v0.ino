@@ -4,6 +4,7 @@
 // LCD pins
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
 
+
 // Pins
 const int TMP36_PIN = A0;
 const int POTENTIOMETER_PIN = A1;
@@ -14,7 +15,12 @@ const int MOSFET_PIN = 9;  // NMOS gate (motor)
 const float V_REF = 5.0;                         // Analog reference voltage
 const float R_BITS = 10.0;                       // ADC resolution (bits)
 const float ADC_STEPS = (1 << int(R_BITS)) - 1;  // Number of steps (2^R_BITS - 1)
-const float TOLERANCE = 0.5;                     // °C
+
+// Motor parameters
+const unsigned long HOLD_MS = 2000;   // seconds over/under setpoint
+const uint8_t PWM_LOW = 100;          // base speed after turning ON (0..255)
+const uint8_t PWM_HIGH  = 250;        // max speed
+const float   MAX_OVER_RATIO = 0.15f; // % above setC to increase motor speed
 
 // Logger
 enum LogLevel : uint8_t { LOG_ERROR = 0,
@@ -131,32 +137,65 @@ float readSetpointC() {
   return (float)setC;
 }
 
+
 /**
- * Controls the motor (and LED) with tolerance to avoid rapid switching.
+ * Two-speed motor control with Xs hold-time.
+ * - Turn ON only if tC > setC continuously for HOLD_MS.
+ * - Turn OFF only if tC < setC continuously for HOLD_MS.
+ * - While ON: LOW speed unless tC >= setC*(1+MAX_OVER_RATIO) → HIGH.
  *
- * @param tC     Current measured temperature (°C).
- * @param setC   Temperature setpoint (°C).
- * @return bool  Current motor state (true = ON, false = OFF).
+ * @return uint8_t PWM applied (0, PWM_LOW, or PWM_HIGH)
  */
-bool controlMotor(float tC, float setC) {
-  static bool isMotorStateOn = false;
-  bool prev = isMotorStateOn;
+uint8_t updateMotorTwoSpeed(float tC, float setC) {
+  static bool on = false;
+  static uint8_t curPwm = 0;
 
-  if (tC > setC + TOLERANCE) {
-    isMotorStateOn = true;
-  } else if (tC < setC - TOLERANCE) {
-    isMotorStateOn = false;
-  }
+  // Timers for "over" and "under" conditions
+  static bool overTiming = false, underTiming = false;
+  static unsigned long overStart = 0, underStart = 0;
+  unsigned long now = millis();
 
-  if (isMotorStateOn != prev) {
-    if (isMotorStateOn) {
-      logMessage(LOG_INFO, "CHANGE - MOTOR ON", setC + TOLERANCE);
-    } else {
-      logMessage(LOG_INFO, "CHANGE - MOTOR OFF", setC - TOLERANCE);
+  // ON condition: tC > setC for >= HOLD_MS
+  if (tC > setC) {
+    if (!overTiming) { overTiming = true; overStart = now; }
+    if (!on && (now - overStart >= HOLD_MS)) {
+      on = true;
+      logMessage(LOG_INFO, "CHANGE - MOTOR ON");
     }
+  } else {
+    overTiming = false;
   }
 
-  return isMotorStateOn;
+  // OFF condition: tC < setC for >= HOLD_MS
+  if (tC < setC) {
+    if (!underTiming) { underTiming = true; underStart = now; }
+    if (on && (now - underStart >= HOLD_MS)) {
+      on = false;
+      logMessage(LOG_INFO, "CHANGE - MOTOR OFF");
+    }
+  } else {
+    underTiming = false;
+  }
+
+  // Decide target PWM
+  uint8_t targetPwm = 0;
+  if (on) {
+    const float highThresholdC = setC * (1.0f + MAX_OVER_RATIO);
+    targetPwm = (tC >= highThresholdC) ? PWM_HIGH : PWM_LOW;
+  }
+
+  // Apply outputs (log on change)
+  if (targetPwm != curPwm) {
+    char msg[64];
+    snprintf(msg, sizeof(msg), "CHANGE - MOTOR PWM FROM %u TO %u", curPwm, targetPwm);
+    logMessage(LOG_INFO, msg);
+    curPwm = targetPwm;
+  }
+
+  analogWrite(MOSFET_PIN, curPwm);
+  digitalWrite(LED_PIN, curPwm > 0 ? HIGH : LOW);
+
+  return curPwm;
 }
 
 void setup() {
@@ -179,12 +218,9 @@ void setup() {
 void loop() {
   float tC = readTemperatureC();
   float setC = readSetpointC();
-  bool isMotorStateOn = controlMotor(tC, setC);
 
-  // LED and Motor via NMOS
-  digitalWrite(LED_PIN, isMotorStateOn ? HIGH : LOW);
-  digitalWrite(MOSFET_PIN, isMotorStateOn ? HIGH : LOW);
-
+  updateMotorTwoSpeed(tC, setC);
+  
   // LCD
   lcd.setCursor(0, 0);
   lcd.print("Temp:");
