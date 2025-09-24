@@ -1,62 +1,11 @@
 #include <LiquidCrystal.h>
 #include <stdio.h>
 #include "config.h"
+#include "logging.h"
+#include "safety.h"
 
 // LCD pins
 LiquidCrystal lcd(12, 11, 5, 4, 3, 2);
-
-/**
- * Converts a LogLevel enum into a label.
- *
- * @param lv  Logging level (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG).
- * @return const char*  Pointer to a string literal ("ERROR", "WARN", "INFO", "DEBUG").
- * */
-inline const char* levelToStr(LogLevel lv) {
-  switch (lv) {
-    case LOG_ERROR: return "ERROR";
-    case LOG_WARN: return "WARN";
-    case LOG_INFO: return "INFO";
-    default: return "DEBUG";
-  }
-}
-
-/**
- * Emits a timestamped log line over the Serial port in the format:
- *   "<millis> ms LEVEL: message"
- *
- * @param level    Logging severity (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG).
- * @param message  Label printed before the value (e.g., "TempC").
- * @return void
- * */
-inline void logMessage(LogLevel level, const char* message) {
-  if (!LOGGING_ACTIVE) return;
-  Serial.print(millis());
-  Serial.print(" ms ");
-  Serial.print(levelToStr(level));
-  Serial.print(": ");
-  Serial.println(message);
-}
-
-/**
- * Emits a timestamped log line over the Serial port in the format:
- *   "<millis> ms LEVEL: message=value"
- *
- * @param level    Logging severity (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG).
- * @param message  Label printed before the value (e.g., "TempC").
- * @param value    Numeric value to print after 'message='.
- * @param digits   Number of decimal places for the value (default: 2).
- * @return void
- * */
-inline void logMessage(LogLevel level, const char* message, float value, int digits = 2) {
-  if (!LOGGING_ACTIVE) return;
-  Serial.print(millis());
-  Serial.print(" ms ");
-  Serial.print(levelToStr(level));
-  Serial.print(": ");
-  Serial.print(message);
-  Serial.print('=');
-  Serial.println(value, digits);
-}
 
 /**
  * Reads the TMP36 analog sensor and converts the raw ADC value to °C.
@@ -132,7 +81,10 @@ uint8_t updateMotorTwoSpeed(float tC, float setC) {
 
   // ON condition: tC > setC for >= HOLD_MS
   if (tC > setC) {
-    if (!overTiming) { overTiming = true; overStart = now; }
+    if (!overTiming) {
+      overTiming = true;
+      overStart = now;
+    }
     if (!on && (now - overStart >= HOLD_MS)) {
       on = true;
       logMessage(LOG_INFO, "CHANGE - MOTOR ON");
@@ -143,7 +95,10 @@ uint8_t updateMotorTwoSpeed(float tC, float setC) {
 
   // OFF condition: tC < setC for >= HOLD_MS
   if (tC < setC) {
-    if (!underTiming) { underTiming = true; underStart = now; }
+    if (!underTiming) {
+      underTiming = true;
+      underStart = now;
+    }
     if (on && (now - underStart >= HOLD_MS)) {
       on = false;
       logMessage(LOG_INFO, "CHANGE - MOTOR OFF");
@@ -199,22 +154,32 @@ void setup() {
 void loop() {
   float tC = readTemperatureC();
   float setC = readSetpointC();
+  bool isSafe = checkRanges(tC, setC);
 
-  updateMotorTwoSpeed(tC, setC);
-  
-  // LCD
-  lcd.setCursor(0, 0);
-  lcd.print("Temp:");
-  lcd.print(tC, 1);
-  lcd.write((byte)223);
-  lcd.print("C  ");
+  if (!isSafe) {
+    digitalWrite(MOSFET_PIN, LOW);
+    digitalWrite(LED_PIN, LOW);
 
-  lcd.setCursor(0, 1);
-  lcd.print("Set:");
-  lcd.print(setC, 1);
-  lcd.write((byte)223);
-  lcd.print("C ");
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("ERROR - ALERT");
+    delay(5000);
+  } else {
+    updateMotorTwoSpeed(tC, setC);
 
-  delay(200);
+    // LCD
+    lcd.setCursor(0, 0);
+    lcd.print("Temp:");
+    lcd.print(tC, 1);
+    lcd.write((byte)223);
+    lcd.print("C  ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("Set:");
+    lcd.print(setC, 1);
+    lcd.write((byte)223);
+    lcd.print("C ");
+
+    delay(200);
+  }
 }
-
