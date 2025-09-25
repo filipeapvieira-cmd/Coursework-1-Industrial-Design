@@ -1,3 +1,18 @@
+
+/**
+ * Returns the median value of three integers.
+ *
+ * @param a  First reading
+ * @param b  Second reading
+ * @param c  Third reading
+ * @return   The median of the three values
+ */
+int median3(int a, int b, int c) {
+  if ((a >= b && a <= c) || (a <= b && a >= c)) return a;
+  else if ((b >= a && b <= c) || (b <= a && b >= c)) return b;
+  else return c;
+}
+
 /**
  * Reads the TMP36 analog sensor and converts the raw ADC value to °C.
  *
@@ -9,16 +24,11 @@
  * @see https://www.analog.com/media/en/technical-documentation/data-sheets/TMP35_36_37.pdf
  */
 float readTemperatureC() {
-  /**
-   * Reads the raw analog value (0–1023) from the specified pin.
-   *
-   * The ADC maps input voltages between 0 V and the reference voltage
-   * into integer values between 0 and 1023.
-   *
-   * @return int  Raw ADC value (0–1023).
-   * @see https://docs.arduino.cc/language-reference/en/functions/analog-io/analogRead/
-  */
-  int rawValue = analogRead(TMP36_PIN);
+  int r1 = analogRead(TMP36_PIN);
+  int r2 = analogRead(TMP36_PIN);
+  int r3 = analogRead(TMP36_PIN);
+  int rawValue = median3(r1, r2, r3);
+
   float voltage = (rawValue / ADC_STEPS) * V_REF;
   return (voltage - 0.5f) * 100.0f;
 }
